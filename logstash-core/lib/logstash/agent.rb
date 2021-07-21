@@ -100,6 +100,8 @@ class LogStash::Agent
     @instance_reload_metric = metric.namespace([:stats, :reloads])
     initialize_agent_metrics
 
+    initialize_geoip_database_metrics(metric)
+
     @dispatcher = LogStash::EventDispatcher.new(self)
     LogStash::PLUGIN_REGISTRY.hooks.register_emitter(self.class, dispatcher)
     dispatcher.fire(:after_initialize)
@@ -114,9 +116,9 @@ class LogStash::Agent
 
     transition_to_running
 
-    converge_state_and_update
-
     start_webserver_if_enabled
+
+    converge_state_and_update
 
     if auto_reload?
       # `sleep_then_run` instead of firing the interval right away
@@ -208,6 +210,15 @@ class LogStash::Agent
     logger.error("An exception happened when converging configuration", attributes)
   end
 
+  ##
+  # Shut down a pipeline and wait for it to fully stop.
+  # WARNING: Calling from `Plugin#initialize` or `Plugin#register` will result in deadlock.
+  # @param pipeline_id [String]
+  def stop_pipeline(pipeline_id)
+    action = LogStash::PipelineAction::Stop.new(pipeline_id.to_sym)
+    converge_state_with_resolved_actions([action])
+  end
+
   # Calculate the Logstash uptime in milliseconds
   #
   # @return [Integer] Uptime in milliseconds
@@ -281,6 +292,10 @@ class LogStash::Agent
     @pipelines_registry.running_pipelines
    end
 
+   def loading_pipelines
+    @pipelines_registry.loading_pipelines
+   end
+
   def non_running_pipelines
     @pipelines_registry.non_running_pipelines
   end
@@ -320,6 +335,15 @@ class LogStash::Agent
   def resolve_actions_and_converge_state(pipeline_configs)
     @convergence_lock.synchronize do
       pipeline_actions = resolve_actions(pipeline_configs)
+      converge_state(pipeline_actions)
+    end
+  end
+
+  # Beware the usage with #resolve_actions_and_converge_state
+  # Calling this method in `Plugin#register` causes deadlock.
+  # For example, resolve_actions_and_converge_state -> pipeline reload_action -> plugin register -> converge_state_with_resolved_actions
+  def converge_state_with_resolved_actions(pipeline_actions)
+    @convergence_lock.synchronize do
       converge_state(pipeline_actions)
     end
   end
@@ -531,6 +555,30 @@ class LogStash::Agent
     @pipeline_reload_metric.namespace([action.pipeline_id, :reloads]).tap do |n|
       n.increment(:successes)
       n.gauge(:last_success_timestamp, action_result.executed_at)
+    end
+  end
+
+  def initialize_geoip_database_metrics(metric)
+    begin
+      require_relative ::File.join(LogStash::Environment::LOGSTASH_HOME, "x-pack", "lib", "filters", "geoip", "database_manager")
+      database_manager = LogStash::Filters::Geoip::DatabaseManager.instance
+      database_manager.metric = metric.namespace([:geoip_download_manager]).tap do |n|
+        db = n.namespace([:database])
+        [:ASN, :City].each do  |database_type|
+          db_type = db.namespace([database_type])
+          db_type.gauge(:status, nil)
+          db_type.gauge(:last_updated_at, nil)
+          db_type.gauge(:fail_check_in_days, 0)
+        end
+
+        dl = n.namespace([:download_stats])
+        dl.increment(:successes, 0)
+        dl.increment(:failures, 0)
+        dl.gauge(:last_checked_at, nil)
+        dl.gauge(:status, nil)
+      end
+    rescue LoadError => e
+      @logger.trace("DatabaseManager is not in classpath")
     end
   end
 end # class LogStash::Agent

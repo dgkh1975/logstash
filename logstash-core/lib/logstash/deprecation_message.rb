@@ -15,23 +15,17 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# This is a patch for childprocess and this is due to ruby-cabin/fpm interaction.
-# When we use the logger.pipe construct and the IO reach EOF we close the IO.
-# The problem Childprocess will try to flush to it and hit an IOError making the software crash in JRuby 9k.
-#
-# In JRuby 1.7.25 we hit a thread death.
-#
-module ChildProcess
-  module JRuby
-    class Pump
-      alias_method :old_pump, :pump
+require 'singleton'
 
-      def ignore_close_io
-        old_pump
-      rescue IOError
-      end
+###
+# This is a place for storing deprecation message which cannot deliver to user before log4j initialization.
+# eg. command line flags deprecation warning. `bin/logstash --debug`
+module LogStash
+  class DeprecationMessage < Array
+    include Singleton
 
-      alias_method :pump, :ignore_close_io
+    def self.instance
+      @@instance ||= Array.new
     end
   end
 end
